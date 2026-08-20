@@ -1,0 +1,413 @@
+```md
+# CloudWatch Agent Setup for On-Prem Ubuntu
+
+## Goal
+
+Send system and custom metrics from an on-prem Ubuntu/WSL server to AWS CloudWatch.
+
+Architecture:
+
+Ubuntu / WSL
+    ↓ HTTPS 443
+AWS CloudWatch APIs
+    ↓
+CloudWatch Metrics
+
+---
+
+## 1. Configure AWS CLI
+
+Verify:
+
+```bash
+aws --version
+```
+
+Configure credentials:
+
+```bash
+aws configure
+```
+
+Example:
+
+AWS Access Key ID     = <access-key>
+AWS Secret Access Key = <secret-key>
+Region                = us-east-1
+Output                = json
+```
+
+Verify authentication:
+
+```bash
+aws sts get-caller-identity
+```
+
+---
+
+## 2. IAM Permissions
+
+The IAM user used by the on-prem server needs CloudWatch permissions.
+
+For the CloudWatch Agent, AWS managed policy:
+
+```text
+CloudWatchAgentServerPolicy
+```
+
+was attached.
+
+---
+
+## 3. Test Custom Metric Manually
+
+Publish a test metric:
+
+```bash
+aws cloudwatch put-metric-data \
+  --namespace "OnPrem/Ubuntu" \
+  --metric-name TestMetric \
+  --value 1 \
+  --dimensions Server=LAPTOP-HOO65F3F
+```
+
+Verify:
+
+```bash
+aws cloudwatch list-metrics \
+  --namespace "OnPrem/Ubuntu"
+```
+
+Expected:
+
+```text
+Namespace  = OnPrem/Ubuntu
+Metric     = TestMetric
+Dimension  = Server=LAPTOP-HOO65F3F
+```
+
+---
+
+## 4. Install CloudWatch Agent
+
+```bash
+cd /tmp
+
+wget https://amazoncloudwatch-agent.s3.amazonaws.com/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
+
+sudo dpkg -i amazon-cloudwatch-agent.deb
+```
+
+Check:
+
+```bash
+/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a status
+```
+
+Initially:
+
+```text
+status       = stopped
+configstatus = not configured
+```
+
+---
+
+## 5. Configure Credentials for On-Prem Agent
+
+File:
+
+```text
+/opt/aws/amazon-cloudwatch-agent/etc/common-config.toml
+```
+
+Configuration:
+
+```toml
+[credentials]
+shared_credential_profile = "default"
+shared_credential_file = "/root/.aws/credentials"
+```
+
+Because this is not EC2, there is no EC2 IAM instance role.
+
+The agent uses the AWS credentials file instead.
+
+---
+
+## 6. Configure Metrics
+
+File:
+
+```text
+/opt/aws/amazon-cloudwatch-agent/etc/cloudwatch-agent.json
+```
+
+Example:
+
+```json
+{
+  "agent": {
+    "metrics_collection_interval": 60
+  },
+
+  "metrics": {
+    "namespace": "OnPrem/Ubuntu",
+
+    "metrics_collected": {
+      "cpu": {
+        "resources": ["*"],
+        "measurement": [
+          "usage_active",
+          "usage_user",
+          "usage_system",
+          "usage_iowait"
+        ],
+        "totalcpu": true,
+        "append_dimensions": {
+          "Server": "LAPTOP-HOO65F3F"
+        }
+      },
+
+      "mem": {
+        "measurement": [
+          "used_percent",
+          "available_percent"
+        ],
+        "append_dimensions": {
+          "Server": "LAPTOP-HOO65F3F"
+        }
+      },
+
+      "disk": {
+        "resources": ["/"],
+        "measurement": [
+          "used_percent",
+          "free"
+        ],
+        "append_dimensions": {
+          "Server": "LAPTOP-HOO65F3F"
+        }
+      }
+    }
+  }
+}
+```
+
+Metrics collected:
+
+```text
+CPU
+Memory
+Filesystem/Disk
+```
+
+Collection interval:
+
+```text
+60 seconds
+```
+
+---
+
+## 7. Start the Agent
+
+```bash
+/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+  -a fetch-config \
+  -m onPremise \
+  -s \
+  -c file:/opt/aws/amazon-cloudwatch-agent/etc/cloudwatch-agent.json
+```
+
+Important:
+
+```text
+-m onPremise
+```
+
+tells the agent this is an on-premises machine.
+
+---
+
+## 8. Verify Agent
+
+```bash
+/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a status
+```
+
+Expected:
+
+```text
+status       = running
+configstatus = configured
+```
+
+Systemd:
+
+```bash
+systemctl status amazon-cloudwatch-agent
+```
+
+Logs:
+
+```bash
+tail -100 \
+/opt/aws/amazon-cloudwatch-agent/logs/amazon-cloudwatch-agent.log
+```
+
+---
+
+## 9. Verify Metrics
+
+List metrics:
+
+```bash
+aws cloudwatch list-metrics \
+  --namespace "OnPrem/Ubuntu"
+```
+
+Query memory directly:
+
+```bash
+aws cloudwatch get-metric-statistics \
+  --namespace "OnPrem/Ubuntu" \
+  --metric-name mem_used_percent \
+  --dimensions Name=Server,Value=LAPTOP-HOO65F3F \
+  --statistics Average \
+  --period 60 \
+  --start-time "$(date -u -d '15 minutes ago' +%Y-%m-%dT%H:%M:%SZ)" \
+  --end-time "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+```
+
+---
+
+# CloudWatch Metric Terminology
+
+Example:
+
+```text
+Namespace = OnPrem/Ubuntu
+Metric    = mem_used_percent
+Dimension = Server=LAPTOP-HOO65F3F
+Value     = 35%
+```
+
+### Namespace
+
+Logical group/container for metrics.
+
+```text
+OnPrem/Ubuntu
+```
+
+### Metric
+
+What is being measured.
+
+```text
+mem_used_percent
+cpu_usage_active
+disk_used_percent
+```
+
+### Dimension
+
+Identifies which resource the metric belongs to.
+
+```text
+Server=LAPTOP-HOO65F3F
+```
+
+### Dimension Name
+
+```text
+Server
+```
+
+### Dimension Value
+
+```text
+LAPTOP-HOO65F3F
+```
+
+### Datapoint
+
+Actual measurement at a particular time.
+
+Example:
+
+```text
+Metric    = mem_used_percent
+Server    = LAPTOP-HOO65F3F
+Timestamp = 00:50
+Value     = 35
+Unit      = Percent
+```
+
+### Period
+
+Time bucket used when querying metrics.
+
+```text
+--period 60
+```
+
+means:
+
+```text
+60 seconds
+```
+
+### Statistic
+
+How datapoints are summarized.
+
+Examples:
+
+```text
+Average
+Minimum
+Maximum
+Sum
+SampleCount
+```
+
+---
+
+## Quick Memory
+
+Namespace
+    ↓
+GROUP
+
+Metric
+    ↓
+WHAT are we measuring?
+
+Dimension
+    ↓
+WHICH resource?
+
+Value
+    ↓
+HOW MUCH?
+
+Timestamp
+    ↓
+WHEN?
+
+Example:
+
+OnPrem/Ubuntu
+    ↓
+mem_used_percent
+    ↓
+Server=LAPTOP-HOO65F3F
+    ↓
+35%
+    ↓
+00:50
+```
+
+We can consider the **CloudWatch Agent hands-on setup documented** and continue with the remaining EC2 monitoring topics.
