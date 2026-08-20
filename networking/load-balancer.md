@@ -1249,3 +1249,139 @@ Selected Backend
  ↓
 Application Response
 ```
+
+Yes — concrete request/response examples make this much clearer.
+
+## 502 Bad Gateway
+
+Client sends:
+
+```http
+GET /api/users HTTP/1.1
+Host: app.example.com
+```
+
+Load balancer forwards to backend:
+
+```text
+ALB → 10.0.1.20:8080
+```
+
+Backend accepts the connection, but then:
+
+```text
+Connection reset
+```
+
+or sends a malformed HTTP response.
+
+So ALB returns:
+
+```http
+HTTP/1.1 502 Bad Gateway
+Content-Type: text/html
+```
+
+Meaning:
+
+> The LB reached the backend, but the backend response was invalid or broken.
+
+---
+
+## 503 Service Unavailable
+
+Client sends:
+
+```http
+GET /checkout HTTP/1.1
+Host: app.example.com
+```
+
+ALB checks its target group:
+
+```text
+10.0.1.10 → unhealthy
+10.0.1.20 → unhealthy
+10.0.2.10 → unhealthy
+```
+
+There is nowhere to send the request.
+
+ALB responds directly:
+
+```http
+HTTP/1.1 503 Service Unavailable
+Content-Type: text/html
+```
+
+Meaning:
+
+> I received your request, but no healthy service/backend is currently available.
+
+---
+
+## 504 Gateway Timeout
+
+Client sends:
+
+```http
+GET /reports/monthly HTTP/1.1
+Host: app.example.com
+```
+
+ALB forwards:
+
+```text
+ALB → 10.0.1.20:8080
+```
+
+Backend receives it and maybe runs:
+
+```sql
+SELECT ...
+```
+
+But the DB query takes too long.
+
+```text
+0 sec  → request sent
+10 sec → waiting
+30 sec → waiting
+60 sec → still no response
+```
+
+The load balancer timeout is reached.
+
+ALB sends:
+
+```http
+HTTP/1.1 504 Gateway Timeout
+Content-Type: text/html
+```
+
+Meaning:
+
+> I successfully sent the request to the backend, but the backend did not respond in time.
+
+### Side-by-side
+
+```text
+502:
+Client → LB → Backend → BAD response/reset
+Client ← 502
+
+503:
+Client → LB → NO healthy backend
+Client ← 503
+
+504:
+Client → LB → Backend → ........too slow........
+Client ← 504
+```
+
+The important difference is **where the request fails**:
+
+> **502 = response problem**  
+> **503 = availability problem**  
+> **504 = timeout problem**
+
